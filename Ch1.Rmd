@@ -1,0 +1,282 @@
+---
+title: "Sports Statistics in R"
+author: "Charles Baird"
+date: "6/6/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+```
+
+## Batting Average as a Statistic
+
+### Why should we trust statistics over what we see?
+
+> "Think about it. One absolutely cannot tell, by watching, the difference between a .300 hitter and a .275 hitter. The difference is one hit every two weeks. It might be that a reporter, seeing every game that the team plays, could sense that difference over the course of the year if no records were kept, but I doubt it. Certainly the average fan, seeing perhaps a tenth of the team's games, could never gauge two performances accurately - in fact if you see both 15 games a year, there is a 40% chance that the .275 hitter will have more hits than the .300 hitter in the games that you see. The difference between a good hitter and an average hitter is simply not visible - it is a matter of record."
+
+>~ Michael Lewis, Moneyball (p. 67-68)
+
+Consider MLB batting data for the 1986 season.
+
+The data here is generated from retrosheet.org event files
+
+  >bevent -y 1986 -f 0,10,36,37,38,39 1986***.ev* >86mlb.txt
+
+param 0: gameID \newline
+param 10: playerID (batter) \newline
+param 36: AB flag \newline
+param 37: hitvalue (0,1,2,3,4 - no hit, single, etc) \newline
+param 38: SH flag \newline
+param 39: SF flag \newline
+
+Let us find the batting averages for each player this season, adjusting for minimum plate appearances.
+
+\newpage
+
+```{r}
+## Read batting data from generated retrosheet files
+batdat <- read.csv("86mlb.txt", header = F)
+names(batdat) <- c("gameID", "playerID", "Event", "AB", "hitvalue", "SH", "SF")
+
+## Function returns season batting average
+# (3.1 PA * League Avg Games Played).
+# PA = AB + BB + HBP + SF + SH
+# @param dfp: data frame of events for single player
+# @[OPT]param games: number of games in season [OPT]
+# @return: int batting average, NA if ineligible
+
+seasonBA <- function(dfp, g){
+  if(missing(g)){
+    g = 162
+  }
+  H <- sum(dfp$hitvalue > 0)
+  AB <- sum(dfp$AB)
+  PA <- AB + sum(dfp$SF) + sum(dfp$SH) +
+    sum(dfp$Event == 14) + sum(dfp$Event == 15) +
+    sum(dfp$Event == 16)
+  
+  return(ifelse(PA >= trunc(3.1 * g), H/AB, NA))
+}
+
+## Batting averages for MLB, playerID as names
+mlbBA <- na.omit(daply(batdat, .(playerID), seasonBA))
+
+## Top 5 Batters
+head(mlbBA[order(-mlbBA)], 5)
+```
+
+Consider mlbBA, a list of adjusted batting averages.
+
+The name of each value is the playerID.
+
+We can find the players with the season averages closest to our target values (in the book's case .275 and .300) and then use sample to pick n (book example: 15) games to attend.
+
+Our goal is to have a list of n games (represented by a data frame each) containing hits and at bats for a player with a specific batting average (or closest to).
+
+\newpage
+
+```{r}
+## Function returns integer values of hits and AB
+#   with gameID as the name
+#
+# @param sn: data frame of integer single game hit values
+# and AB booleans
+# @return: c(hits, at bats)
+
+gameBA <- function(sn){
+  c(sum(sn$hitvalue > 0), sum(sn$AB))
+}
+
+## Function returns sample of batting data for n games
+# @param id: Batting average returned from mlbBA,
+#   names(id) gives playerID
+# @param n: Number of games to sample
+# @return: Array of H/AB, named by gameID
+
+sampBAT <- function(id, n){
+  d <- batdat[batdat$playerID == names(id), ]
+  g <- factor(d$gameID)
+  rep = F
+  if(n > length(levels(g))){
+    rep <- T
+    print("Fewer games than sample size!")
+  }
+  
+  return(laply(sample(split(d, g),
+                      n, replace = rep), gameBA))
+}
+```
+
+Let's test these two functions.
+
+\newpage
+
+```{r}
+batChamp <- mlbBA[order(-mlbBA)[1]]
+sampBAT(batChamp, 15)
+```
+
+sampBAT and gameBA were tested on the player with the highest batting average in baseball that year (Wade Boggs).
+
+Above, is a list of his hits and at bats for fifteen games.
+
+What we would like to do, is find the players with the batting averages closest to .275 and .300, take a sample of their games and compare their observed batting averages from that sample. How often does our sample batting average reflect their true batting average over the full season when compared head to head?
+
+\newpage
+
+```{r}
+## This function finds the batters with the closest
+#   batting averages to lowAvg and highAvg and returns
+#   TRUE if we determined the player with the higher
+#   season batting average had the higher batting average
+#   as observed in our sample.
+# @param loID: Named low average, in book example .275
+# @param hiID: Named high average, in book example .300
+# @param n: How many games in sample, in book 15
+# @[OPT]param v: optional boolean for verbose output
+# @return: 1 if tied, > 1 if correct, < 1 if incorrect
+
+compBat <- function(loID, hiID, n, v){
+  if(missing(v)){
+    v = F
+  }
+  
+  cslo <- colSums(sampBAT(loID, n))
+  cshi <- colSums(sampBAT(hiID, n))
+
+  if(v){
+    st1 <- c(names(loID), "1986 avg:",
+             round(mlbBA[names(mlbBA) == names(loID)], 3))
+    st2 <- c(names(hiID), "1986 avg:",
+             round(mlbBA[names(mlbBA) == names(hiID)], 3))
+    st3 <- c(names(loID), round(cslo[1]/cslo[2], 3))
+    st4 <- c(names(hiID), round(cshi[1]/cshi[2], 3))
+    
+    print(paste(c(st1, st2), collapse = " "))
+    cat("\n")
+    print(paste(c(st3, st4), collapse = " "))
+    cat("\n")
+  }    
+  
+  return((cslo[1] / cslo[2]) / (cshi[1] / cshi[2]))
+}
+
+id275 <- mlbBA[order(abs(mlbBA - .275))[1]]
+id300 <- mlbBA[order(abs(mlbBA - .300))[1]]
+
+compBat(id275, id300, 15, v = T)
+```
+
+Now, let's simulate this 1000 times and see how often we reach the right conclusion from our sample.
+
+\newpage
+
+```{r}
+## This function simulates n instances of watching g games
+#   and reports the percentage of times you would have 
+#   observed the batter with a higher season BA.
+# @param loID: Named low average, in book example .275
+# @param hiID: Named high average, in book example .300
+# @param g: How many games in sample, in book 15
+# @param n: How many times to simulate
+# @return: sum of successes over simulations
+
+sim <- function(lo, hi, g, n){
+  
+  loID <- mlbBA[order(abs(mlbBA - lo))[1]]
+  hiID <- mlbBA[order(abs(mlbBA - hi))[1]]
+
+  suc <- c()
+  
+  for(j in 1:n){
+    suc <- c(suc, compBat(loID, hiID, g) < 1)
+  }
+  
+  return(sum(suc) / n)
+}
+
+sim(.275, .300, 15, 1000)
+```
+
+Let's try again, but be superfans and see 50 games per year.
+
+```{r}
+sim(.275, .300, 50, 1000)
+```
+
+What if we saw half a season?
+
+```{r}
+sim(.275, .300, 81, 1000)
+```
+
+A hundred games per season...
+
+```{r}
+sim(.275, .300, 100, 1000)
+```
+
+Let's have some fun and see if we compare batting champion, Wade Boggs, with whoever was 100 on the batting list.
+
+```{r}
+bat100 <- mlbBA[order(-mlbBA)][100]
+
+sim(bat100, batChamp, 15, 1000)
+```
+
+Your ability to see the difference between a .275 and .300 hitter over 100 games is about the same as the ability to see the difference between Wade Boggs and Jody Davis over 15.
+
+\newpage
+
+One last exercise to see this relationship more clearly. On the x-axis we will have the difference in the batting average of two random players. On the y-axis we will have how often we could tell the better player on the season from just 15 games.
+
+```{r}
+## This function samples two random player from mlbBA
+#   then simulates n instances of watching g games
+#   and reports the percentage of times you would have 
+#   observed the batter with a higher season BA.
+# @param g: How many games in sample, in book 15
+# @param n: How many times to simulate
+# @return: difference in batting average, % correct
+
+difSim <- function(g, n){
+  s <- sample(mlbBA, 2, replace = F)
+  
+  dif <- s[[order(s)[2]]] - s[[order(s)[1]]]
+  cor <- sim(s[order(s)[1]], s[order(s)[2]], g, n)
+  
+  return(c(dif, cor))
+}
+
+## This function returns data points to plot % correct
+#   observations against the actual difference in BA
+# @param g: How many games in sample, in book 15
+# @param n: How many times to simulate
+# @param pts: Number of points to return for plotting
+# @return: vectors of BA difference and % correct
+
+difRel <- function(g, n, pts){
+  vdif <- c()
+  vcor <- c()
+  
+  for(i in 1:pts){
+    new <- difSim(g, n)
+    vdif <- c(vdif, new[1])
+    vcor <- c(vcor, new[2])
+}
+
+return(list(vdif, vcor))
+}
+
+dat <- difRel(15, 1000, 100)
+
+fit <- lm(dat[[2]] ~ dat[[1]])
+
+plot(dat[[1]], dat[[2]],
+     xlab = "Actual Batting Average Difference on Season",
+     ylab = "% correct obs. from sample",
+     main = "Correct Observations vs Difference in BA")
+abline(fit)
+```
