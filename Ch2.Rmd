@@ -1,0 +1,212 @@
+---
+title: "Parameter Estimation"
+author: "Charles Baird"
+date: "7/3/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+```
+
+## Parameter Estimation of Runs vs OBP and SLG
+
+> "Baseball fans and announcers were just then getting around to the Jamesean obsession with on-base and slugging percentages. The game, slowly, was turning its attention to the new statistic, OPS (on-base plus slugging). OPS was the simple addition of on-base and slugging percentages. Crude as it was, it was a much better indicator than any other offensive statistic of the number of runs a team would score. Simply adding the two statistics together however, implied they were of equal importance. If the goal was to raise a team's OPS, an extra percentage point of on-base was as good as an extra percentage point of slugging." 
+
+>~ Michael Lewis, Moneyball (p. 127)
+
+Consider the multiple linear regression model:
+
+$Y = \beta_{0} + \beta_{1}X_{1} + \beta_{2}X_{2} + \epsilon$
+
+Where \newline
+$Y$ is runs scored \newline
+$X_{1}$ is OBP \newline
+$X_{2}$ is SLG \newline
+$\epsilon$ has standard normal distribution. \newline
+
+The function mlbStat builds MLB team stats from the retrosheet.org game logs loaded as a data frame for a given year. Read the [Guide to Retrosheet Game Logs](https://www.retrosheet.org/gamelogs/glfields.txt) for column descriptions. mlbStat uses the columns necessary to build the statistics of interest, OBP and SLG.
+
+$OBP = \frac{H + BB + HBP}{AB + BB + HBP + SF}$
+
+$SLG = \frac{(1B) + 2 (2B) + 3 (3B) + 4 (HR)}{AB}$
+
+Where
+
+$H =$ Hits \newline
+$BB =$ Walks \newline
+$HBP =$ Hit By Pitch \newline
+$AB =$ At Bat \newline
+$SF =$ Sacrifice Fly \newline
+$1B =$ Single \newline
+$2B =$ Double \newline
+$3B =$ Triple \newline
+$HR =$ Home Run \newline
+
+\newpage
+
+```{r}
+## I like to use MLB data from 1979 because I have to
+#   handle Disco Demolition Night
+
+mlb79 <- read.csv("GL1979.TXT", header = F, as.is = T, stringsAsFactors = F)
+
+## This function takes the game log data frame and extracts
+#   the statistics we need to calculate OBP and SLG
+# @param df: game logs for the year
+# @return: data frame of total team stats for the year
+
+mlbStat <- function(df){
+  # Data is split by home and visiting team
+  # We will calculate separately and combine at end
+  vis <- split(df, df$V4)
+  hom <- split(df, df$V7)
+  # Wins
+  vW <- laply(vis, function(x) sum(x$V10 > x$V11))
+  hW <- laply(hom, function(x) sum(x$V10 < x$V11))
+  # Take the column sums for the relevant data
+  # See retrosheet.org for column descriptions
+  vSt <- laply(vis, function(x)
+    colSums(x[,c(10,22:27,29:31)], na.rm = T))
+  hSt <- laply(hom, function(x)
+    colSums(x[,c(11,50:55,57:59)], na.rm = T))
+  # Build the data frame which will be used to construct
+  # the design matrix
+  ret <- cbind.data.frame(team = names(vis),
+      W = vW + hW,
+      R = vSt[,1] + hSt[,1],
+      BA = round((vSt[,3] + hSt[,3])/(vSt[,2] + hSt[,2]), 3),
+      RBI = vSt[,7] + hSt[,7],
+      OBP = round((vSt[,3] + hSt[,3] + vSt[,10] +
+                     hSt[,10] + vSt[,9] + hSt[,9]) /
+                    (vSt[,2] + hSt[,2] + vSt[,10] + hSt[,10] +
+                       vSt[,9] + hSt[,9] + vSt[,8] + hSt[,8])
+                  , 3),
+      SLG = round((vSt[,3] + hSt[,3] + vSt[,4] + hSt[,4] +
+        2 * (vSt[,5] + hSt[,5]) + 3 * (vSt[,6] + hSt[,6])) /
+        (vSt[,2] + hSt[,2]), 3)
+      )
+  
+  return(ret)
+}
+```
+\newpage
+```{r}
+# Check the data against the known totals
+
+head(mlbStat(mlb79), 10)
+```
+
+Our training data is valid and can be used to estimate the parameters of the linear regression model. A least squares line can be calculated to find parameters:
+
+$\hat{\beta} = (\hat{\beta_{0}}, \hat{\beta_{1}}, \hat{\beta_{2}})^{\intercal}$
+
+to produce predictions:
+
+$\hat{Y} = \hat{\beta_{0}} + \hat{\beta_{1}} X_{1} + \hat{\beta_{2}} X_{2}$
+
+The goal is to minimize the sum of the squared differences of actual runs scored and our predictions. It achieves its minimum at:
+
+$\hat{\beta} = (X^{\intercal}X)^{-1}X^{\intercal}Y$
+
+Where
+
+$Y =$ Runs \newline
+$X =$ Design matrix (DM79 below)
+```{r}
+data79 <- mlbStat(mlb79)
+
+# design matrix
+DM79 <- cbind(rep(1, nrow(data79)), data79$OBP, data79$SLG)
+beta_hat79 <- solve((t(DM79) %*% DM79)) %*% t(DM79) %*% data79$R
+
+rownames(beta_hat79) <- c("int", "OBP", "SLG")
+round(t(beta_hat79), 2)
+```
+
+> In his [Paul DePodesta's] model an extra point of on-base percentage was worth three times an extra point of slugging percentage.
+
+> Michael Lewis, Moneyball (p. 128)
+
+At least for this season, his view is not heresy. With some context, maybe the more accepted figure of one and a half will show up.
+
+\newpage
+
+```{r}
+# Load the yearly filenames into a list by decade
+
+files <- list.files(path="glogs/", pattern = "^GL.*.TXT", full.names = T, recursive = F)
+
+## This function takes a list of filenames for yearly
+#   games logs and returns the total team stats
+# @param ls: list of filenames of years to get data for
+# @return: list of team stat data frames
+
+readStat <- function(ls){
+  rSlist <- llply(ls, function(x){
+    t <- read.csv(x, header = F, as.is = T,
+                stringsAsFactors = F)
+    return(mlbStat(t))
+  })
+  
+}
+
+## This function takes a data frame returned by mlbStat
+#   and returns the estimated model parameters
+# @param df: mlbStat data frame
+# @return: model parameters
+
+paramEst <- function(df){
+  dm <- cbind(rep(1, nrow(df)), df$OBP, df$SLG)
+  beta_hat <- solve((t(dm) %*% dm)) %*% t(dm) %*% df$R
+  rownames(beta_hat) <- c("int", "OBP", "SLG")
+  return(round(t(beta_hat), 2))
+}
+
+# Apply our new functions to get data by decade
+since1910Stats <- readStat(files)
+names(since1910Stats) <- seq(1:110) + 1909
+
+par110 <- sapply(since1910Stats, paramEst, USE.NAMES = TRUE)
+```
+
+par110 is 110 seasons worth of parameters. I want to explore the ratio of the OBP parameter to the SLG parameter for trends by decade.
+
+\newpage
+```{r}
+# Define our decades
+DECs <- list()
+
+for(i in 1:11) DECs[[i]] <-
+  colnames(par110) < 1910 + 10 * i &
+  colnames(par110) >= 1900 + 10 * i
+
+OBPtoSLG <- par110[2,] / par110[3,]
+
+lapply(DECs, function(x){
+  round(c(summary(OBPtoSLG[x]),
+          Variance = var(OBPtoSLG[x])),3)
+})
+```
+
+Somewhere around the sixties, the mean of the ratio of the OBP to SLG parameters hovers below 2 consistently, with a median which is lower by a little more than a point. However, the variance is blowing up until the early 2000s, when median significantly drops. After that, the mean settles with a very small variance.
+
+The only similar period of stability is in the 1950s.
+
+```{r}
+colvec <- c()
+for(i in 1:11) colvec <- c(colvec, rep(i,10))
+
+plot(seq(1910:2019), OBPtoSLG,
+     xlab = "Year", ylab = "OBP/SLG", main = "1900 - 2019",
+     col = colvec, ylim = c(0,5))
+# ylim is in place because the scale gets messed up by 1932
+# The OBP to SLG parameter ratio for that year was over 20
+```
+
+The stretch we are experiencing now has lasted longer than the period in the 1950s. It may have actually settled.
+
+Perhaps, a large variance in the ratio of fitted parameters which greatly correlate with a desired variable like runs indicates inefficiencies in predicting their expected value. 
+
+I want to try this analysis at the individual level.
